@@ -1,0 +1,53 @@
+import retro
+import numpy as np
+from stable_baselines3 import PPO, DQN
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from gym.wrappers import GrayScaleObservation, ResizeObservation
+
+from Discretizer import Discretizer
+from RetroEnv import RetroEnv
+
+combos = [
+    ["UP"], ["DOWN"], ["LEFT"], ["RIGHT"],
+    ["A"], ["B"], ["C"], ["D"],
+    ["A","C"], ["B","D"], ["UP","A"], ["DOWN","B"]
+]
+
+# env = retro.make('MortalKombatII-Genesis', players=2, use_restricted_actions=retro.Actions.ALL)
+# print("Action space:", env.action_space)
+# env = Discretizer(env, combos)
+# env = DummyVecEnv([lambda: env])
+#
+# model1 = PPO('MlpPolicy', env, device='cpu', verbose=1, learning_rate=0.01)
+# model1.learn(5000)
+# model2 = DQN('MlpPolicy', env, device='cpu', verbose=1, learning_rate=0.01)
+# model2.learn(5000)
+
+# PPO training
+ppo_env = retro.make('MortalKombatII-Genesis', players=1, use_restricted_actions=retro.Actions.ALL)
+ppo_env = DummyVecEnv([lambda: ppo_env])
+model1 = PPO('MlpPolicy', ppo_env)
+model1.learn(5000)
+ppo_env.close()
+
+# DQN training
+dqn_env = retro.make('MortalKombatII-Genesis', players=1, use_restricted_actions=retro.Actions.ALL)
+dqn_env = Discretizer(dqn_env, combos)
+dqn_env = DummyVecEnv([lambda: dqn_env])
+model2 = DQN('MlpPolicy', dqn_env)
+model2.learn(5000)
+dqn_env.close()
+
+env = retro.make('MortalKombatII-Genesis', players=2, use_restricted_actions=retro.Actions.ALL)
+obs = env.reset()
+
+while True:
+    action1, _ = model1.predict(obs)
+    action2, _ = model2.predict(obs)
+    action = np.concatenate([action1, action2])
+    obs, reward, done, info = env.step(action)
+    env.render()
+    if done.any():
+        obs = env.reset()
+
+env.close()
