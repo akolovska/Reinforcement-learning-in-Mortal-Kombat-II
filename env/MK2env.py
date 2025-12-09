@@ -21,15 +21,19 @@ def show_frame(frame, delay=1):
 def preprocess_obs(obs):
     """
     obs: (H, W, 3), uint8
-    -> (N,) float32 flattened grayscale
+    -> (N,) uint8 flattened grayscale
+    Consistent preprocessing: convert to grayscale, resize to 84x84, flatten
+    Note: Normalization (dividing by 255) is done in the agents' act() methods
     """
-    gray = obs.mean(axis=2) / 255.0  # (H, W)
-    return gray.astype(np.float32).ravel()  # (H*W,)
+    gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+    resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
+    return resized.ravel()  # Returns uint8 array, agents normalize it
+
 
 class MK2TwoAgentEnv:
     """
     Wrapper around Retro:
-    - P1 = DQN agent
+    - P1 = DDQN agent
     - P2 = PPO agent
     - Both have 10 discrete actions
     - Reward = damage dealt to opponent this step
@@ -65,15 +69,15 @@ class MK2TwoAgentEnv:
         obs = self.env.reset()
         self.prev_p1_hp, self.prev_p2_hp = self._read_hp()
         obs_proc = preprocess_obs(obs)
-        return obs_proc, obs_proc  # obs_dqn, obs_ppo (same screen)
+        return obs_proc, obs_proc  # obs_ddqn, obs_ppo (same screen)
 
-    def step(self, a_dqn, a_ppo):
+    def step(self, a_ddqn, a_ppo):
         """
-        a_dqn, a_ppo: discrete actions in [0, n_actions)
+        a_ddqn, a_ppo: discrete actions in [0, n_actions)
         Returns:
-          next_obs_dqn, next_obs_ppo, r_dqn, r_ppo, done, info
+          next_obs_ddqn, next_obs_ppo, r_ddqn, r_ppo, done, info
         """
-        joint_action = self._build_joint_action(a_dqn, a_ppo)
+        joint_action = self._build_joint_action(a_ddqn, a_ppo)
         obs, _, done, info = self.env.step(joint_action)
 
         if self.render_enabled:
@@ -84,7 +88,7 @@ class MK2TwoAgentEnv:
         p1_hp, p2_hp = self._read_hp()
 
         # Rewards: damage dealt
-        r_dqn = max(0, self.prev_p2_hp - p2_hp)  # DQN = P1 damaging P2
+        r_ddqn = max(0, self.prev_p2_hp - p2_hp)  # DDQN = P1 damaging P2
         r_ppo = max(0, self.prev_p1_hp - p1_hp)  # PPO = P2 damaging P1
 
         self.prev_p1_hp, self.prev_p2_hp = p1_hp, p2_hp
@@ -93,7 +97,7 @@ class MK2TwoAgentEnv:
         done = bool(done or p1_hp <= 0 or p2_hp <= 0)
 
         obs_proc = preprocess_obs(obs)
-        return obs_proc, obs_proc, r_dqn, r_ppo, done, info
+        return obs_proc, obs_proc, r_ddqn, r_ppo, done, info
 
     def close(self):
         self.env.close()

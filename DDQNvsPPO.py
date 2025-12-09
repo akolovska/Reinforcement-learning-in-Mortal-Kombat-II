@@ -15,8 +15,10 @@ if not hasattr(seeding, 'hash_seed'):
 
 import numpy as np
 import torch
-from collections import namedtuple
 import cv2
+import os
+import json
+from datetime import datetime
 
 GAME = "MortalKombatII-Genesis"
 
@@ -24,29 +26,11 @@ P1_HP_ADDR = 0x00B622
 P2_HP_ADDR = 0x00B712
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-Transition = namedtuple("Transition", ("state", "action", "reward", "next_state", "done"))
 
-USE_PER = True  # set False for standard DDQN
+# Checkpoint settings
+CHECKPOINT_DIR = "checkpoints"
+SAVE_CHECKPOINT_EVERY = 100  # Save every N episodes
 
-
-def show_frame(frame, delay=1):
-    """
-    Show an RGB frame using OpenCV.
-    frame: (H, W, 3) in RGB.
-    """
-    if frame is None:
-        return
-    img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    cv2.imshow("MK2 AI Battle", img)
-    cv2.waitKey(delay)
-
-def preprocess_obs(obs):
-    """
-    obs: (H, W, 3), uint8
-    -> (N,) float32 flattened grayscale
-    """
-    gray = obs.mean(axis=2) / 255.0  # (H, W)
-    return gray.astype(np.float32).ravel()  # (H*W,)
 
 def run_evaluation_match(env, ddqn, ppo, render=True):
     """
@@ -63,8 +47,8 @@ def run_evaluation_match(env, ddqn, ppo, render=True):
         print(f"\n=== Evaluation Round {round_idx + 1} ===")
 
         while not done:
-            a_ddqn = ddqn.act(obs_ddqn, greedy=False)
-            a_ppo, _, _ = ppo.act(obs_ppo, greedy=False)
+            a_ddqn = ddqn.act(obs_ddqn, greedy=True)
+            a_ppo, _, _ = ppo.act(obs_ppo, greedy=True)
 
             next_obs_ddqn, next_obs_ppo, r_ddqn, r_ppo, done, info = env.step(a_ddqn, a_ppo)
             obs_ddqn, obs_ppo = next_obs_ddqn, next_obs_ppo
@@ -91,20 +75,48 @@ def run_evaluation_match(env, ddqn, ppo, render=True):
         return "Tie"
 
 
+def save_training_stats(stats, filepath):
+    """Save training statistics to JSON file"""
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, 'w') as f:
+        json.dump(stats, f, indent=2)
+    print(f"Training stats saved to {filepath}")
+
+
 def main():
+    # Create checkpoint directory
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(CHECKPOINT_DIR, f"run_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    print(f"Training run directory: {run_dir}")
+    print(f"Using device: {DEVICE}")
+
     env = MK2TwoAgentEnv(render=False)
 
     obs_ddqn, obs_ppo = env.reset()
     obs_dim = obs_ddqn.shape[0]
     n_actions = env.n_actions
 
-    ddqn = DDQNAgent(obs_dim, n_actions, use_per=USE_PER)
+    ddqn = DDQNAgent(obs_dim, n_actions)
     ppo = PPOAgent(obs_dim, n_actions)
 
     num_episodes = 1000
     max_steps = 2000
 
-    print(f"Training DDQN (PER={USE_PER}) vs PPO for {num_episodes} episodes...")
+    # Training statistics
+    training_stats = {
+        'episodes': [],
+        'ddqn_rewards': [],
+        'ppo_rewards': [],
+        'steps': [],
+        'timestamp': timestamp,
+    }
+
+    print(f"\nTraining DDQN vs PPO for {num_episodes} episodes...")
+    print(f"Checkpoints will be saved every {SAVE_CHECKPOINT_EVERY} episodes")
+    print("=" * 70)
 
     for ep in range(num_episodes):
         obs_ddqn, obs_ppo = env.reset()
@@ -140,21 +152,83 @@ def main():
 
         ppo.finish_trajectory_and_update()
 
-        print(f"Episode {ep} | DDQN reward: {ep_r_ddqn:.1f} | PPO reward: {ep_r_ppo:.1f} | steps: {steps}")
+        # Record statistics
+        training_stats['episodes'].append(ep)
+        training_stats['ddqn_rewards'].append(float(ep_r_ddqn))
+        training_stats['ppo_rewards'].append(float(ep_r_ppo))
+        training_stats['steps'].append(steps)
+
+        print(f"Episode {ep:4d} | DDQN: {ep_r_ddqn:6.1f} | PPO: {ep_r_ppo:6.1f} | Steps: {steps:4d}")
+
+        # Save checkpoints periodically
+        if (ep + 1) % SAVE_CHECKPOINT_EVERY == 0:
+            ddqn_path = os.path.join(run_dir, f"ddqn_ep{ep + 1}.pt")
+            ppo_path = os.path.join(run_dir, f"ppo_ep{ep + 1}.pt")
+            ddqn.save_checkpoint(ddqn_path)
+            ppo.save_checkpoint(ppo_path)
+
+            # Save training stats
+            stats_path = os.path.join(run_dir, "training_stats.json")
+            save_training_stats(training_stats, stats_path)
+
+    # Save final checkpoints
+    print("\n" + "=" * 70)
+    print("Training finished! Saving final checkpoints...")
+    ddqn.save_checkpoint(os.path.join(run_dir, "ddqn_final.pt"))
+    ppo.save_checkpoint(os.path.join(run_dir, "ppo_final.pt"))
+    save_training_stats(training_stats, os.path.join(run_dir, "training_stats.json"))
 
     env.close()
 
-    print("\n==============================")
-    print("Training finished. Starting evaluation match...")
-    print("==============================")
+    print("\n" + "=" * 70)
+    print("Starting 10 evaluation matches...")
+    print("=" * 70)
 
     eval_env = MK2TwoAgentEnv(render=True)
-    winner = run_evaluation_match(eval_env, ddqn, ppo, render=True)
-    print("\n=== FINAL RESULT ===")
-    print("Winner of Best-of-3:", winner)
+
+    ddqn_total = 0
+    ppo_total = 0
+    ties = 0
+
+    num_matches = 10
+    eval_results = []
+
+    for i in range(num_matches):
+        print(f"\n######## Evaluation Match {i + 1}/{num_matches} ########")
+        winner = run_evaluation_match(eval_env, ddqn, ppo, render=True)
+
+        if winner == "DDQN":
+            ddqn_total += 1
+        elif winner == "PPO":
+            ppo_total += 1
+        else:
+            ties += 1
+
+        eval_results.append({'match': i + 1, 'winner': winner})
+        print(f"Match {i + 1} winner: {winner}")
+
+    print("\n" + "=" * 70)
+    print("FINAL RESULTS ACROSS 10 MATCHES")
+    print("=" * 70)
+    print(f"DDQN wins: {ddqn_total}")
+    print(f"PPO wins : {ppo_total}")
+    print(f"Ties     : {ties}")
+    print("=" * 70)
+
+    # Save evaluation results
+    eval_stats = {
+        'ddqn_wins': ddqn_total,
+        'ppo_wins': ppo_total,
+        'ties': ties,
+        'matches': eval_results,
+    }
+    eval_path = os.path.join(run_dir, "evaluation_results.json")
+    save_training_stats(eval_stats, eval_path)
 
     eval_env.close()
     cv2.destroyAllWindows()
+
+    print(f"\nAll results saved to: {run_dir}")
 
 
 if __name__ == "__main__":

@@ -2,8 +2,10 @@ import numpy as np
 import torch.nn as nn
 import torch
 from torch import optim
+import os
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class PPOPolicy(nn.Module):
     def __init__(self, input_dim, n_actions):
@@ -37,7 +39,7 @@ class PPOAgent:
         self.trajectory = []  # store (s, a, logp, r, v, done)
 
     def act(self, obs, greedy=False):
-        obs_t = torch.from_numpy(obs).float().unsqueeze(0).to(DEVICE)
+        obs_t = (torch.from_numpy(obs).float() / 255.0).unsqueeze(0).to(DEVICE)
         with torch.no_grad():
             logits, value = self.net(obs_t)
         if greedy:
@@ -64,7 +66,7 @@ class PPOAgent:
         states, actions, logps, rewards, values, dones = zip(*self.trajectory)
         self.trajectory = []
 
-        states = torch.from_numpy(np.stack(states)).float().to(DEVICE)
+        states = torch.from_numpy(np.stack(states)).float().to(DEVICE) / 255.0
         actions = torch.tensor(actions).long().to(DEVICE)
         old_logps = torch.tensor(logps).float().to(DEVICE)
         values = torch.tensor(values).float().to(DEVICE)
@@ -106,4 +108,27 @@ class PPOAgent:
 
             self.optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=0.5)
             self.optimizer.step()
+
+    def save_checkpoint(self, filepath):
+        """Save model checkpoint"""
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        checkpoint = {
+            'net_state_dict': self.net.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+        }
+        torch.save(checkpoint, filepath)
+        print(f"PPO checkpoint saved to {filepath}")
+
+    def load_checkpoint(self, filepath):
+        """Load model checkpoint"""
+        if not os.path.exists(filepath):
+            print(f"Checkpoint {filepath} not found")
+            return False
+
+        checkpoint = torch.load(filepath, map_location=DEVICE)
+        self.net.load_state_dict(checkpoint['net_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"PPO checkpoint loaded from {filepath}")
+        return True
