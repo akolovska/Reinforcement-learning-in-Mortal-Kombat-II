@@ -1,231 +1,240 @@
 import gym.utils.seeding as seeding
-from agents.DQN import DQNAgent
-from agents.PPO import PPOAgent
-from env.MK2env import MK2TwoAgentEnv
-
-if not hasattr(seeding, 'hash_seed'):
-    import hashlib
-
-
-    def hash_seed(seed):
-        h = hashlib.sha512(str(seed).encode('utf-8')).digest()
-        return int.from_bytes(h[:4], 'big')
-
-
-    seeding.hash_seed = hash_seed
-
-import numpy as np
 import torch
 import cv2
 import os
 import json
 from datetime import datetime
 
-GAME = "MortalKombatII-Genesis"
+from agents.DQN import DQNAgent
+from agents.DDQN import DDQNAgent
+from env.MK2env import MK2TwoAgentEnv
 
-P1_HP_ADDR = 0x00B622
-P2_HP_ADDR = 0x00B712
+# --- Gym Retro seeding fix ---
+if not hasattr(seeding, "hash_seed"):
+    import hashlib
+    def hash_seed(seed):
+        h = hashlib.sha512(str(seed).encode("utf-8")).digest()
+        return int.from_bytes(h[:4], "big")
+    seeding.hash_seed = hash_seed
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# ===============================
 # Checkpoint settings
+# ===============================
 CHECKPOINT_DIR = "checkpoints"
-SAVE_CHECKPOINT_EVERY = 100  # Save every N episodes
+SAVE_CHECKPOINT_EVERY = 100  # save every N episodes
 
+def save_json(data, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"Saved: {path}")
 
-def run_evaluation_match(env, dqn, ppo, render=True):
+def save_agent_checkpoint(agent, path):
     """
-    Runs a BEST OF 3 evaluation match.
-    Returns winner: 'DQN', 'PPO', or 'Tie'
+    Uses agent.save_checkpoint(path) if it exists.
+    Otherwise saves common fields (q_net/target_net/optimizer) if present.
     """
-    dqn_wins = 0
-    ppo_wins = 0
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    if hasattr(agent, "save_checkpoint") and callable(getattr(agent, "save_checkpoint")):
+        agent.save_checkpoint(path)
+        return
+
+    payload = {}
+    # common DQN-like naming
+    if hasattr(agent, "q_net"):
+        payload["q_net_state_dict"] = agent.q_net.state_dict()
+    if hasattr(agent, "target_net"):
+        payload["target_net_state_dict"] = agent.target_net.state_dict()
+    if hasattr(agent, "optimizer"):
+        payload["optimizer_state_dict"] = agent.optimizer.state_dict()
+    # optionally store step counters / epsilon if present
+    if hasattr(agent, "step_count"):
+        payload["step_count"] = agent.step_count
+    if hasattr(agent, "epsilon"):
+        payload["epsilon"] = agent.epsilon
+
+    torch.save(payload, path)
+    print(f"Checkpoint saved to {path} (fallback saver)")
+
+# ===============================
+# Evaluation (Best-of-3)
+# ===============================
+def run_eval_match(env, dqn, ddqn):
+    """
+    One match = Best-of-3 rounds.
+    Returns winner: "DQN" | "DDQN" | "Tie"
+    """
+    dqn_wins, ddqn_wins = 0, 0
 
     for round_idx in range(3):
-        obs_dqn, obs_ppo = env.reset()
+        obs_dqn, obs_ddqn = env.reset()
         done = False
 
-        print(f"\n=== Evaluation Round {round_idx + 1} ===")
-
         while not done:
-            # Use greedy=True for evaluation (no exploration)
+            # deterministic actions for eval (NO exploration)
             a_dqn = dqn.act(obs_dqn, greedy=True)
-            a_ppo, _, _ = ppo.act(obs_ppo, greedy=True)
+            a_ddqn = ddqn.act(obs_ddqn, greedy=True)
 
-            next_obs_dqn, next_obs_ppo, r_dqn, r_ppo, done, info = env.step(a_dqn, a_ppo)
-            obs_dqn, obs_ppo = next_obs_dqn, next_obs_ppo
+            obs_dqn, obs_ddqn, _, _, done, _ = env.step(a_dqn, a_ddqn)
 
-        p1_hp, p2_hp = env._read_hp()
-        print(f"End HP -> DQN (P1): {p1_hp}, PPO (P2): {p2_hp}")
+        p1_hp, p2_hp = env._read_hp()  # P1 = DQN, P2 = DDQN
+
         if p1_hp > p2_hp:
             dqn_wins += 1
-            print("DQN wins round!")
         elif p2_hp > p1_hp:
-            ppo_wins += 1
-            print("PPO wins round!")
-        else:
-            print("Tie round")
+            ddqn_wins += 1
 
-        if dqn_wins == 2 or ppo_wins == 2:
+        if dqn_wins == 2 or ddqn_wins == 2:
             break
 
-    if dqn_wins > ppo_wins:
+    if dqn_wins > ddqn_wins:
         return "DQN"
-    elif ppo_wins > dqn_wins:
-        return "PPO"
+    elif ddqn_wins > dqn_wins:
+        return "DDQN"
     else:
         return "Tie"
 
-
-def save_training_stats(stats, filepath):
-    """Save training statistics to JSON file"""
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, 'w') as f:
-        json.dump(stats, f, indent=2)
-    print(f"Training stats saved to {filepath}")
-
-
+# ===============================
+# Main
+# ===============================
 def main():
-    # Create checkpoint directory
+    # run dir like your template
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(CHECKPOINT_DIR, f"run_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
 
-    print(f"Training run directory: {run_dir}")
-    print(f"Using device: {DEVICE}")
+    print(f"Run dir: {run_dir}")
+    print(f"Device: {DEVICE}")
 
+    # -------- TRAIN --------
     env = MK2TwoAgentEnv(render=False)
-
-    obs_dqn, obs_ppo = env.reset()
+    obs_dqn, obs_ddqn = env.reset()
     obs_dim = obs_dqn.shape[0]
     n_actions = env.n_actions
 
+    USE_PER = True  # if your DDQN supports it
     dqn = DQNAgent(obs_dim, n_actions)
-    ppo = PPOAgent(obs_dim, n_actions)
+    ddqn = DDQNAgent(obs_dim, n_actions, use_per=USE_PER)
 
     num_episodes = 1000
     max_steps = 2000
 
-    # Training statistics
     training_stats = {
-        'episodes': [],
-        'dqn_rewards': [],
-        'ppo_rewards': [],
-        'steps': [],
-        'timestamp': timestamp,
+        "episodes": [],
+        "dqn_rewards": [],
+        "ddqn_rewards": [],
+        "steps": [],
+        "timestamp": timestamp,
+        "use_per": USE_PER,
     }
 
     print("\n" + "=" * 70)
-    print(f"Training DQN vs PPO for {num_episodes} episodes...")
-    print(f"Checkpoints will be saved every {SAVE_CHECKPOINT_EVERY} episodes")
+    print(f"Training DQN vs DDQN (PER={USE_PER}) for {num_episodes} episodes...")
+    print(f"Saving checkpoints every {SAVE_CHECKPOINT_EVERY} episodes")
     print("=" * 70)
 
     for ep in range(num_episodes):
-        obs_dqn, obs_ppo = env.reset()
+        obs_dqn, obs_ddqn = env.reset()
         done = False
-        ep_r_dqn = 0.0
-        ep_r_ppo = 0.0
         steps = 0
+        ep_r_dqn, ep_r_ddqn = 0.0, 0.0
 
         while not done and steps < max_steps:
             steps += 1
 
-            # Use greedy=False for training (exploration enabled)
+            # exploration ON during training
             a_dqn = dqn.act(obs_dqn, greedy=False)
-            a_ppo, logp_ppo, v_ppo = ppo.act(obs_ppo, greedy=False)
+            a_ddqn = ddqn.act(obs_ddqn, greedy=False)
 
-            next_obs_dqn, next_obs_ppo, r_dqn, r_ppo, done, info = env.step(a_dqn, a_ppo)
+            next_obs_dqn, next_obs_ddqn, r_dqn, r_ddqn, done, _ = env.step(a_dqn, a_ddqn)
 
             ep_r_dqn += r_dqn
-            ep_r_ppo += r_ppo
+            ep_r_ddqn += r_ddqn
 
             dqn.store(obs_dqn, a_dqn, r_dqn, next_obs_dqn, float(done))
-            ppo.store((obs_ppo, a_ppo, logp_ppo, r_ppo, v_ppo, float(done)))
+            ddqn.store(obs_ddqn, a_ddqn, r_ddqn, next_obs_ddqn, float(done))
 
-            obs_dqn, obs_ppo = next_obs_dqn, next_obs_ppo
             dqn.train_step()
+            ddqn.train_step()
 
-        ppo.finish_trajectory_and_update()
+            obs_dqn, obs_ddqn = next_obs_dqn, next_obs_ddqn
 
-        # Record statistics
-        training_stats['episodes'].append(ep)
-        training_stats['dqn_rewards'].append(float(ep_r_dqn))
-        training_stats['ppo_rewards'].append(float(ep_r_ppo))
-        training_stats['steps'].append(steps)
+        # record + print like template
+        training_stats["episodes"].append(ep)
+        training_stats["dqn_rewards"].append(float(ep_r_dqn))
+        training_stats["ddqn_rewards"].append(float(ep_r_ddqn))
+        training_stats["steps"].append(int(steps))
 
-        print(f"Episode {ep:4d} | DQN: {ep_r_dqn:6.1f} | PPO: {ep_r_ppo:6.1f} | Steps: {steps:4d}")
+        print(f"Episode {ep:4d} | DQN: {ep_r_dqn:6.1f} | DDQN: {ep_r_ddqn:6.1f} | Steps: {steps:4d}")
 
-        # Save checkpoints periodically
+        # periodic saves
         if (ep + 1) % SAVE_CHECKPOINT_EVERY == 0:
-            dqn_path = os.path.join(run_dir, f"dqn_ep{ep + 1}.pt")
-            ppo_path = os.path.join(run_dir, f"ppo_ep{ep + 1}.pt")
-            dqn.save_checkpoint(dqn_path)
-            ppo.save_checkpoint(ppo_path)
-
-            # Save training stats
-            stats_path = os.path.join(run_dir, "training_stats.json")
-            save_training_stats(training_stats, stats_path)
-
-    # Save final checkpoints
-    print("\n" + "=" * 70)
-    print("Training finished! Saving final checkpoints...")
-    dqn.save_checkpoint(os.path.join(run_dir, "dqn_final.pt"))
-    ppo.save_checkpoint(os.path.join(run_dir, "ppo_final.pt"))
-    save_training_stats(training_stats, os.path.join(run_dir, "training_stats.json"))
+            save_agent_checkpoint(dqn, os.path.join(run_dir, f"dqn_ep{ep+1}.pt"))
+            save_agent_checkpoint(ddqn, os.path.join(run_dir, f"ddqn_ep{ep+1}.pt"))
+            save_json(training_stats, os.path.join(run_dir, "training_stats.json"))
 
     env.close()
 
+    # final save
     print("\n" + "=" * 70)
-    print("Starting 10 evaluation matches...")
+    print("Training finished! Saving final checkpoints...")
+    print("=" * 70)
+
+    save_agent_checkpoint(dqn, os.path.join(run_dir, "dqn_final.pt"))
+    save_agent_checkpoint(ddqn, os.path.join(run_dir, "ddqn_final.pt"))
+    save_json(training_stats, os.path.join(run_dir, "training_stats.json"))
+
+    # -------- EVAL (10 matches) --------
+    print("\n" + "=" * 70)
+    print("Starting 10 evaluation matches (Best-of-3 each)...")
     print("=" * 70)
 
     eval_env = MK2TwoAgentEnv(render=True)
 
-    dqn_total = 0
-    ppo_total = 0
-    ties = 0
-
+    dqn_total, ddqn_total, ties = 0, 0, 0
     num_matches = 10
     eval_results = []
 
     for i in range(num_matches):
-        print(f"\n######## Evaluation Match {i + 1}/{num_matches} ########")
-        winner = run_evaluation_match(eval_env, dqn, ppo, render=True)
+        print(f"\n######## Evaluation Match {i+1}/{num_matches} ########")
+        winner = run_eval_match(eval_env, dqn, ddqn)
+        print(f"Match {i+1} winner: {winner}")
 
         if winner == "DQN":
             dqn_total += 1
-        elif winner == "PPO":
-            ppo_total += 1
+        elif winner == "DDQN":
+            ddqn_total += 1
         else:
             ties += 1
 
-        eval_results.append({'match': i + 1, 'winner': winner})
-        print(f"Match {i + 1} winner: {winner}")
+        eval_results.append({"match": i + 1, "winner": winner})
 
     print("\n" + "=" * 70)
     print("FINAL RESULTS ACROSS 10 MATCHES")
     print("=" * 70)
-    print(f"DQN wins: {dqn_total}")
-    print(f"PPO wins: {ppo_total}")
-    print(f"Ties    : {ties}")
+    print(f"DQN wins : {dqn_total}")
+    print(f"DDQN wins: {ddqn_total}")
+    print(f"Ties     : {ties}")
     print("=" * 70)
 
-    # Save evaluation results
-    eval_stats = {
-        'dqn_wins': dqn_total,
-        'ppo_wins': ppo_total,
-        'ties': ties,
-        'matches': eval_results,
-    }
-    eval_path = os.path.join(run_dir, "evaluation_results.json")
-    save_training_stats(eval_stats, eval_path)
+    save_json(
+        {
+            "dqn_wins": dqn_total,
+            "ddqn_wins": ddqn_total,
+            "ties": ties,
+            "matches": eval_results,
+        },
+        os.path.join(run_dir, "evaluation_results.json"),
+    )
 
     eval_env.close()
     cv2.destroyAllWindows()
 
     print(f"\nAll results saved to: {run_dir}")
-
 
 if __name__ == "__main__":
     main()

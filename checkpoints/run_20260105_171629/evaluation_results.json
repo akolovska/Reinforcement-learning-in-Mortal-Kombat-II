@@ -1,0 +1,47 @@
+{
+  "dqn_wins": 0,
+  "ddqn_wins": 10,
+  "ties": 0,
+  "matches": [
+    {
+      "match": 1,
+      "winner": "DDQN"
+    },
+    {
+      "match": 2,
+      "winner": "DDQN"
+    },
+    {
+      "match": 3,
+      "winner": "DDQN"
+    },
+    {
+      "match": 4,
+      "winner": "DDQN"
+    },
+    {
+      "match": 5,
+      "winner": "DDQN"
+    },
+    {
+      "match": 6,
+      "winner": "DDQN"
+    },
+    {
+      "match": 7,
+      "winner": "DDQN"
+    },
+    {
+      "match": 8,
+      "winner": "DDQN"
+    },
+    {
+      "match": 9,
+      "winner": "DDQN"
+    },
+    {
+      "match": 10,
+      "winner": "DDQN"
+    }
+  ]
+}

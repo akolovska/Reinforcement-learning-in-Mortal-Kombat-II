@@ -1,0 +1,47 @@
+{
+  "ppo_wins": 0,
+  "a2c_wins": 10,
+  "ties": 0,
+  "matches": [
+    {
+      "match": 1,
+      "winner": "A2C"
+    },
+    {
+      "match": 2,
+      "winner": "A2C"
+    },
+    {
+      "match": 3,
+      "winner": "A2C"
+    },
+    {
+      "match": 4,
+      "winner": "A2C"
+    },
+    {
+      "match": 5,
+      "winner": "A2C"
+    },
+    {
+      "match": 6,
+      "winner": "A2C"
+    },
+    {
+      "match": 7,
+      "winner": "A2C"
+    },
+    {
+      "match": 8,
+      "winner": "A2C"
+    },
+    {
+      "match": 9,
+      "winner": "A2C"
+    },
+    {
+      "match": 10,
+      "winner": "A2C"
+    }
+  ]
+}
